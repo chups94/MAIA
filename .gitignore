@@ -1,0 +1,19 @@
+# Brouillon Word (hors rendu) et fichiers de verrouillage Office
+Q1.docx
+~$*
+
+# Dataset CIFAR-10 téléchargé
+data/
+
+# Logs TensorBoard
+runs/
+
+# Poids du modèle
+*.pth
+
+# Logs SLURM
+logs/
+
+# Python / macOS
+__pycache__/
+.DS_Store

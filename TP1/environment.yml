@@ -1,0 +1,14 @@
+name: deeplearning
+channels:
+  - conda-forge
+  - pytorch
+dependencies:
+  - pip
+  - python=3.10
+  - pytorch==2.5.1
+  - pytorch-cuda=12.1
+  - tensorboard
+  - torchaudio==2.5.1
+  - torchvision==0.20.1
+
+prefix: "/mnt/hdd/homes/sbouchet/miniforge3/envs/deeplearning"
