@@ -17,3 +17,8 @@ logs/
 # Python / macOS
 __pycache__/
 .DS_Store
+
+# Brouillons et fichiers inutiles du TP3
+*.docx
+runs_old/
+TP3/mlp
