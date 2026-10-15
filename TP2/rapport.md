@@ -2,168 +2,171 @@
 
 **Identifiant TSP :** sbouchet
 
+Fichiers du rendu :
+
+- `dataset.py` : classe `CardioDataset` + fonction `get_loaders()` (split 80/10/10 et DataLoaders)
+- `train.py` : MLP, entraînement avec régularisation L1/L2, comparaison des optimiseurs, évaluation (precision, recall, F1, AUC)
+- `data/cardio_train.csv` : dataset Kaggle *Cardiovascular Disease* (non versionné, ignoré par `.gitignore`)
+
+Lancement :
+
+```bash
+python dataset.py              # test du dataset
+python train.py --part reg     # partie 2 (régularisation)
+python train.py --part optim   # parties 3 et 4 (optimiseurs + métriques)
+python train.py                # tout
+tensorboard --logdir=runs
+```
+
 ---
 
 ## Exercice 1 — Création d'un dataset personnalisé
 
-J'ai téléchargé `cardio_train.csv` depuis Kaggle et je l'ai mis dans `TP2/data/`. J'ai complété la classe `CardioDataset` dans `dataset.py` :
+![Sortie de dataset.py](captures/dataset.png)
 
-```python
-def __len__(self):
-    return len(self.labels)
 
-def __getitem__(self, idx):
-    if torch.is_tensor(idx):
-        idx = idx.tolist()
-    local_features = self.features[idx]
-    local_labels = self.labels[idx]
-    return {"features": local_features, "labels": local_labels}
-```
+### Pourquoi faire `StandardScaler()` sur tout le dataset avant le split est une mauvaise pratique ?
 
-Pour les DataLoaders j'ai mis `shuffle=True` pour le train (pour que les batchs changent à chaque epoch) et `shuffle=False` pour la validation.
+Le `StandardScaler` calcule la moyenne et l'écart-type de chaque feature. Si on le fait sur tout le dataset avant le split, ces statistiques sont calculées en utilisant aussi les données de validation et de test. Des informations du test « fuient » donc dans l'entraînement : c'est ce qu'on appelle le **data leakage**.
 
-```bash
-python dataset.py
-```
+Le problème, c'est que le test est censé simuler des données jamais vues. Avec la fuite, l'évaluation est un peu trop optimiste et ne reflète plus vraiment ce qui se passerait en production, où on ne connaît pas les nouvelles données à l'avance.
 
-![dataset.py](captures/dataset.png)
+La bonne pratique : faire le split d'abord, faire `scaler.fit()` **uniquement sur le train**, puis appliquer ce même scaler (`transform()`) au val et au test.
 
-Le dataset fait 70 000 lignes et après le one-hot encoding on a 16 features par exemple.
+### Si le dataset ne tenait pas en RAM (ex : 500 Go) ?
 
-**Pourquoi utiliser StandardScaler sur tout le dataset avant le split est une mauvaise pratique ?**
-
-Le scaler calcule la moyenne et l'écart-type sur toutes les données, donc aussi sur les données de validation et de test. Du coup des informations du test "fuient" dans le prétraitement du train : c'est ce qu'on appelle le data leakage. Le modèle est évalué sur des données qui ne sont plus vraiment inconnues, donc les résultats sur le test sont un peu trop optimistes. Il faudrait faire le split d'abord, faire `fit` du scaler seulement sur le train, puis juste `transform` sur la validation et le test.
-
-**Si le dataset faisait 500 Go, quelle classe utiliser à la place de Dataset ?**
-
-On utiliserait `torch.utils.data.IterableDataset`. Au lieu de tout charger en RAM et d'accéder par index, il lit les données en flux (par exemple ligne par ligne ou par morceaux depuis le disque) avec `__iter__`.
+J'utiliserais un **`torch.utils.data.IterableDataset`** à la place de `Dataset`. Au lieu d'avoir un accès par index (`__getitem__`) qui suppose que tout est chargé en mémoire, on définit `__iter__` qui lit les données en flux (streaming), par exemple morceau par morceau avec `pd.read_csv(..., chunksize=...)`. On n'a ainsi jamais tout le dataset en mémoire en même temps.
 
 ---
 
-## Exercice 2 — Régularisation L1 / L2 manuelle
+## Exercice 2 — MLP et régularisation L1 / L2
 
-J'ai créé `train.py` avec le MLP et j'ai complété la boucle :
+
+
+### Résultats
+
+**Référence : `l1_lambda = 1e-4`, `l2_lambda = 1e-3`**
+
+| Epoch | BCE  | Loss totale | Acc. train | Acc. val |
+|------:|-----:|------------:|-----------:|---------:|
+| 1     | 0.6577 | 0.8433 | 0.6400 | 0.6471 |
+| 5     | 0.6209 | 0.7796 | 0.6612 | 0.6666 |
+| 10    | 0.6017 | 0.7327 | 0.6872 | 0.6980 |
+
+**Régularisation forte : `l1_lambda = 0.1`, `l2_lambda = 0`**
+
+| Epoch | BCE  | Loss totale | Acc. train | Acc. val |
+|------:|-----:|------------:|-----------:|---------:|
+| 1     | 0.6930 | 6.6577 | 0.5003 | 0.4986 |
+| 2     | 0.6931 | 1.6340 | 0.5003 | 0.4986 |
+| 10    | 0.6931 | 1.6340 | 0.4997 | 0.5014 |
+
+![Régularisation : accuracy et loss dans TensorBoard](captures/tb_regularisation.png)
+
+### Qu'observe-t-on avec `l1_lambda = 0.1` et `l2_lambda = 0` ? Pourquoi ?
+
+Le modèle **n'apprend plus rien** :
+
+- la BCE reste bloquée à **0.6931 = ln(2)**, c'est exactement la loss d'un modèle qui prédit toujours 0.5 ;
+- l'accuracy reste autour de **50 %** (train et val), soit le niveau du hasard sur ce dataset équilibré ; elle oscille juste entre 0.4997 et 0.5003 selon que la sortie est un peu au-dessus ou en dessous de 0.5 ;
+- la loss totale chute très vite au début (6.66 → 1.63) mais seulement parce que l'optimiseur fait baisser la pénalité L1, pas la BCE.
+
+Avec λ = 0.1, la pénalité L1 écrase complètement la BCE : à l'initialisation la somme des |w| vaut ≈ 1009, soit ≈ 101 dans la loss contre ≈ 0.69 pour la BCE (la moyenne de 6.66 sur la première epoch vient du fait que ce terme s'effondre dès les premiers batchs). Le gradient est dominé par le terme `λ·sign(w)`, qui pousse tous les poids vers 0. Les poids s'annulent, le réseau ne propage plus aucune information sur les features, et la sortie devient constante (sigmoïde de ≈ 0, donc 0.5). Il reste à peu près 1.63 − 0.69 ≈ 0.94 de pénalité, soit une somme des |w| ≈ 9, ce qui correspond surtout aux poids qui oscillent autour de 0 (SGD ne met jamais exactement à zéro avec la L1) et aux biais.
+
+Ce phénomène s'appelle le **sous-apprentissage (underfitting)** : la contrainte sur les poids est si forte que le modèle n'a plus assez de capacité pour apprendre, même sur les données d'entraînement. C'est l'inverse de l'objectif de la régularisation, qui est de limiter le surapprentissage sans empêcher l'apprentissage.
+
+### Quel argument de l'optimiseur applique la L2 automatiquement ?
+
+L'argument **`weight_decay`**, par exemple :
 
 ```python
-optimizer.zero_grad()
-outputs = model(inputs)
-base_loss = criterion(outputs, targets)
-l1_penalty = sum(p.abs().sum() for p in model.parameters())
-l2_penalty = sum((p ** 2).sum() for p in model.parameters())
-loss = base_loss + l1_lambda * l1_penalty + l2_lambda * l2_penalty
-loss.backward()
-optimizer.step()
+optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-3)
 ```
 
-J'ai aussi affiché la loss, la BCE et l'accuracy sur le train et la validation à chaque epoch pour pouvoir comparer.
+À chaque `step()`, l'optimiseur ajoute `weight_decay * w` au gradient, ce qui revient à la dérivée d'une pénalité L2 `(weight_decay / 2) * ||w||²`. (Attention, le facteur 2 fait que `weight_decay = 2 × l2_lambda` pour être strictement équivalent à notre code. Pour Adam, il existe aussi `optim.AdamW` qui applique un weight decay « découplé », plus efficace qu'une L2 classique avec Adam.)
 
-D'abord avec les valeurs de l'énoncé (`l1_lambda = 1e-4`, `l2_lambda = 1e-3`) :
+### Différence entre L1 et L2 sur les poids
 
-![train.py régularisation faible](captures/train_reg_faible.png)
+- **L1** (`λ·Σ|w|`) : le gradient de la pénalité vaut `λ·sign(w)`, une force **constante** vers 0, quelle que soit la taille du poids. Les petits poids finissent par être mis à **exactement zéro** : la L1 donne des poids **parcimonieux (sparse)**. Ça fait une sorte de sélection de features, seules les connexions vraiment utiles restent.
+- **L2** (`λ·Σw²`) : le gradient vaut `2λ·w`, donc **proportionnel au poids**. Les grands poids sont fortement pénalisés, les petits très peu. Les poids sont **réduits** et répartis de façon plus homogène, mais deviennent rarement exactement nuls.
 
-Le modèle apprend normalement, la BCE baisse et on arrive à environ 69,7 % d'accuracy en validation après 10 epochs.
-
-Ensuite avec `l1_lambda = 0.1` et `l2_lambda = 0` :
-
-![train.py L1 = 0.1](captures/train_reg_forte.png)
-
-**Qu'observe-t-on ?**
-
-Le modèle n'apprend plus rien. La loss totale descend de 6.67 à 1.63 dès la 2e epoch puis ne bouge plus, mais la BCE reste bloquée à 0.6931 (= ln 2) et l'accuracy reste autour de 50 %, donc le modèle répond 0.5 pour tout le monde, c'est comme du hasard.
-
-**Pourquoi ?**
-
-La pénalité L1 est tellement forte que l'optimiseur préfère surtout diminuer la taille des poids plutôt que de diminuer l'erreur de classification. Les poids sont poussés vers 0, le réseau devient presque constant et ne peut plus séparer les classes. C'est du **sous-apprentissage (underfitting)** : le modèle est trop contraint pour apprendre même les données d'entraînement.
-
-**Quel argument de l'optimiseur permet d'appliquer L2 automatiquement ?**
-
-C'est l'argument `weight_decay`, par exemple `optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-3)`.
-
-**Différence entre L1 et L2 sur les poids ?**
-
-- L1 (somme des valeurs absolues) pousse beaucoup de poids à être exactement à 0, donc on obtient des poids parcimonieux (sparse), ça fait un peu une sélection des features.
-- L2 (somme des carrés) diminue tous les poids mais sans les mettre à 0, les poids restent petits et répartis. Elle pénalise surtout les grands poids.
+En résumé : L1 → beaucoup de poids à zéro (modèle creux), L2 → tous les poids petits mais non nuls (modèle plus « lisse »).
 
 ---
 
-## Exercice 3 — Comparaison des optimiseurs avec TensorBoard
+## Exercice 3 — Comparaison des optimiseurs et TensorBoard
 
-Dans `train_optimizers.py` j'ai mis l'entraînement dans une fonction `train_model(opt_name, learning_rate, epochs)` et j'ai complété :
 
-```python
-elif opt_name == "RMSprop":
-    optimizer = optim.RMSprop(model.parameters(), lr=learning_rate)
-elif opt_name == "Adam":
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-```
+### Courbes TensorBoard
 
-J'ai mis `input_size=16` car après l'encodage on a 16 features (et pas 12). J'ai aussi fixé la seed au début de chaque entraînement pour que les 4 optimiseurs partent des mêmes poids.
+![TensorBoard : Training Loss des 4 optimiseurs](captures/tb_optimiseurs.png)
 
-```bash
-python train_optimizers.py
-tensorboard --logdir=runs
-```
+Loss d'entraînement moyenne par epoch :
 
-![train_optimizers.py](captures/optimizers_terminal.png)
+| Optimiseur | Epoch 1 | Epoch 5 | Epoch 10 | Epoch 20 | Epoch 30 | Acc. val (epoch 30) |
+|------------|--------:|--------:|---------:|---------:|---------:|--------------------:|
+| SGD        | 0.6903  | 0.6618  | 0.6407   | 0.6277   | 0.6239   | 0.6581 |
+| Momentum   | 0.6676  | 0.6224  | 0.6046   | 0.5717   | 0.5736   | 0.7327 |
+| RMSprop    | 0.5954  | 0.5514  | 0.5422   | 0.5392   | 0.5355   | 0.7344 |
+| Adam       | 0.5953  | 0.5453  | 0.5408   | 0.5360   | 0.5318   | 0.7319 |
 
-![TensorBoard](captures/tensorboard.png)
+### Quel optimiseur converge le plus rapidement initialement ?
 
-| Optimiseur | Loss epoch 1 | Loss epoch 10 | Loss epoch 30 |
-|---|---|---|---|
-| SGD | 0.6885 | 0.6350 | 0.6250 |
-| Momentum | 0.6579 | 0.5957 | 0.5612 |
-| RMSprop | 0.5928 | 0.5452 | 0.5350 |
-| Adam | 0.5931 | 0.5474 | 0.5357 |
+**Adam** (suivi de très près par RMSprop). Dès la première epoch, Adam et RMSprop sont à ≈ 0.595 alors que SGD est encore à 0.690 (quasiment la loss du hasard, ln 2 ≈ 0.693). Après 5 epochs Adam est déjà à 0.545 et n'évolue presque plus ensuite, alors que SGD n'atteint toujours pas ce niveau après 30 epochs. Adam a aussi la loss finale la plus basse (0.532).
 
-**Quel optimiseur converge le plus vite au début ?**
+Ça s'explique par le fait qu'Adam et RMSprop adaptent le learning rate **par paramètre** (division par la racine de la moyenne des gradients au carré) : les paramètres qui ont de petits gradients avancent quand même avec un pas effectif de l'ordre de `lr`, alors qu'avec SGD le pas est `lr × gradient`, très petit ici avec lr = 0.001. Adam combine en plus ce mécanisme avec un moment.
 
-Ce sont Adam et RMSprop, ils sont quasiment pareils : dès la première epoch ils sont à 0.593 alors que SGD est encore à 0.689. RMSprop est très légèrement devant. Les deux adaptent le learning rate pour chaque paramètre, c'est pour ça qu'ils vont plus vite.
+### SGD vs Momentum : effet du moment
 
-**SGD simple vs Momentum ?**
+Avec le même learning rate, Momentum descend beaucoup plus vite que SGD simple : 0.6046 contre 0.6407 à l'epoch 10, et 0.5736 contre 0.6239 à la fin. En accuracy de validation, Momentum atteint 73 % alors que SGD stagne à 66 %.
 
-Avec le même learning rate (0.001), SGD simple descend très lentement et finit à 0.625 après 30 epochs, alors que Momentum arrive à 0.561. Le momentum garde une partie des gradients précédents (une sorte de vitesse), donc quand les gradients vont dans la même direction les pas deviennent plus grands, et ça réduit les oscillations. La descente est plus rapide et plus régulière.
+Le moment garde une « mémoire » des gradients précédents (vitesse `v ← 0.9·v + g`, puis `w ← w − lr·v`) :
+
+- dans les directions où le gradient garde le même signe d'une itération à l'autre, les contributions s'accumulent : le pas effectif peut aller jusqu'à environ `lr / (1 − 0.9) = 10 × lr`, ce qui **accélère** la descente sur les pentes douces / plateaux ;
+- dans les directions où le gradient change de signe (oscillations dans une « vallée » étroite, bruit des mini-batchs), les contributions se compensent : le moment **amortit les oscillations** et lisse la trajectoire.
+
+SGD simple, lui, avance à petits pas à chaque mini-batch sans inertie, d'où la convergence beaucoup plus lente.
 
 ---
 
-## Exercice 4 — Métriques de classification
+## Exercice 4 — Analyse des métriques
 
-J'ai complété `evaluate_model` dans `evaluate.py` :
+### Code complété (`train.py`, fonction `evaluate_model`)
 
 ```python
-with torch.no_grad():
-    ...
-precision = precision_score(all_targets, all_preds_classes)
-recall = recall_score(all_targets, all_preds_classes)
+    with torch.no_grad(): # Désactiver le calcul des gradients
+        ...
+    precision = precision_score(all_targets, all_preds_classes)
+    recall = recall_score(all_targets, all_preds_classes)
 ```
 
-J'ai pris Adam comme meilleur modèle (avec RMSprop c'est celui qui a la loss la plus basse) et je l'ai évalué sur le test à la fin de l'entraînement. J'ai aussi affiché l'accuracy et la matrice de confusion.
+La fonction est appelée à la fin de `train.py` sur le meilleur des 4 modèles de l'exercice 3, choisi selon l'accuracy sur le **jeu de validation** (pas sur le test, pour ne pas biaiser l'évaluation finale). C'est **RMSprop** qui a été retenu.
 
-```bash
-python evaluate.py Adam
-```
+### Résultats sur le jeu de test (7000 exemples)
 
-![evaluate.py](captures/evaluate.png)
+![Sortie de train.py : métriques sur le test](captures/metriques.png)
 
-| Accuracy | Precision | Recall | F1 | AUC |
-|---|---|---|---|---|
-| 0.7371 | 0.7546 | 0.6997 | 0.7261 | 0.8038 |
+### Définitions de la précision et du rappel
 
-Matrice de confusion (lignes = vraie classe, colonnes = prédiction) :
+Avec TP = vrais positifs, FP = faux positifs, FN = faux négatifs (positif = malade) :
 
-|  | prédit 0 | prédit 1 |
-|---|---|---|
-| **vrai 0** | 2721 (VN) | 793 (FP) |
-| **vrai 1** | 1047 (FN) | 2439 (VP) |
+- **Précision** = TP / (TP + FP) : parmi les patients que le modèle déclare malades, la proportion qui l'est vraiment. Elle mesure la fiabilité des alertes du modèle (peu de fausses alertes).
+- **Rappel** (sensibilité) = TP / (TP + FN) : parmi les patients vraiment malades, la proportion que le modèle détecte. Il mesure la capacité à ne pas rater de malades.
 
-**Définitions**
+Le F1 est la moyenne harmonique des deux : F1 = 2·P·R / (P + R).
 
-- Précision = VP / (VP + FP) : parmi les patients que le modèle prédit malades, la proportion qui sont vraiment malades.
-- Rappel = VP / (VP + FN) : parmi les patients vraiment malades, la proportion que le modèle arrive à détecter.
+Ici, notre modèle a une précision de 75.8 % mais un rappel de 68.4 % : il **rate environ 32 % des malades**.
 
-**Plutôt forte précision ou fort rappel en médecine ?**
+### Contexte médical : précision ou rappel ?
 
-Je pense qu'il vaut mieux un fort rappel. Un faux négatif c'est un malade qu'on ne détecte pas et qui ne sera pas soigné, ça peut être grave. Un faux positif c'est juste une personne saine à qui on fera des examens en plus. Ici le modèle rate 1047 malades sur 3486 (rappel de 0.70), ce qui est beaucoup, on pourrait baisser le seuil en dessous de 0.5 pour augmenter le rappel (en perdant un peu de précision).
+Il vaut mieux privilégier un **fort rappel**. Dans le dépistage d'une maladie cardiovasculaire, un faux négatif (dire à un malade qu'il va bien) est beaucoup plus grave qu'un faux positif : le patient ne sera pas pris en charge et la maladie peut évoluer jusqu'à un infarctus ou un AVC. Un faux positif, lui, entraîne surtout des examens complémentaires (ECG, prise de sang…), ce qui coûte du temps et de l'argent et inquiète le patient, mais l'erreur sera corrigée ensuite.
 
-**À quoi sert l'AUC ?**
+On accepte donc d'avoir plus de fausses alertes pour rater le moins de malades possible. Concrètement, pour notre modèle, on pourrait **baisser le seuil de décision** en dessous de 0.5 (ex : 0.3) pour augmenter le rappel, au prix d'une précision plus faible. Il ne faut pas non plus que la précision soit catastrophique, sinon le modèle n'apporte plus rien (un modèle qui dit « malade » à tout le monde a 100 % de rappel).
 
-La précision, le rappel et le F1 dépendent du seuil de 0.5 qu'on a choisi. L'AUC est l'aire sous la courbe ROC, qui trace le taux de vrais positifs en fonction du taux de faux positifs pour tous les seuils possibles. Elle ne dépend donc pas du seuil et mesure si le modèle classe bien les malades au-dessus des non malades. Ici 0.80, donc dans 80 % des cas un malade pris au hasard a une probabilité plus haute qu'un non malade pris au hasard (0.5 = hasard, 1 = parfait).
+### À quoi sert l'AUC par rapport aux métriques au seuil 0.5 ?
+
+La précision, le rappel et le F1 dépendent du **seuil** choisi (ici 0.5) : on change de seuil, on change les valeurs. Le choix de 0.5 est arbitraire et n'est pas forcément le bon (comme on vient de le voir pour le médical).
+
+La courbe ROC trace le taux de vrais positifs (rappel) en fonction du taux de faux positifs **pour tous les seuils possibles**, et l'**AUC** est l'aire sous cette courbe. Elle résume donc la performance du modèle **indépendamment du seuil**. Elle s'interprète comme la probabilité que le modèle donne un score plus élevé à un patient malade tiré au hasard qu'à un patient sain tiré au hasard (0.5 = hasard, 1 = parfait).
+
+Elle mesure donc la capacité du modèle à bien **classer / séparer** les deux classes, ce qui permet de comparer des modèles entre eux avant de choisir le seuil adapté à l'application. Ici, AUC = 0.80 : dans 80 % des cas le modèle classe un malade au-dessus d'un sain.

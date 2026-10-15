@@ -45,19 +45,25 @@ class CardioDataset(Dataset):
         return {"features": local_features, "labels": local_labels}
 
 
-# Test du Dataset et création des DataLoaders
-if __name__ == '__main__':
-    dataset = CardioDataset("data/cardio_train.csv")
-    print(f"Taille totale du dataset : {len(dataset)}")
+def get_loaders(csv_path="data/cardio_train.csv", batch_size=64):
+    dataset = CardioDataset(csv_path)
 
     # Découpage 80% train, 10% val, 10% test
     generator = torch.Generator().manual_seed(42)
     train_set, val_set, test_set = random_split(dataset, [0.8, 0.1, 0.1], generator=generator)
 
     # Création des DataLoaders
-    train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
-    val_loader   = DataLoader(val_set, batch_size=64, shuffle=False)
-    test_loader  = DataLoader(test_set, batch_size=64, shuffle=False)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+    test_loader  = DataLoader(test_set, batch_size=batch_size, shuffle=False)
+    return dataset, train_loader, val_loader, test_loader
+
+
+# Test du Dataset et création des DataLoaders
+if __name__ == '__main__':
+    dataset, train_loader, val_loader, test_loader = get_loaders("data/cardio_train.csv")
+    print(f"Taille totale du dataset : {len(dataset)}")
+    print(f"Train : {len(train_loader.dataset)} | Val : {len(val_loader.dataset)} | Test : {len(test_loader.dataset)}")
 
     # Test de lecture
     batch = next(iter(train_loader))
